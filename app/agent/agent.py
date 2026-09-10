@@ -1,4 +1,7 @@
+
+#agent.py
 import sympy as sp
+import ast
 
 from tools.equations import solve_equation
 
@@ -41,6 +44,7 @@ from explanation.explainer import (
 )
 
 from agent.planner import create_plan
+from agent.llm_planner import create_llm_plan
 from agent.tool_selector import select_tool
 
 
@@ -53,11 +57,21 @@ def get_matrix():
     while True:
 
         try:
-            rows = int(input("Enter number of rows: "))
-            cols = int(input("Enter number of columns: "))
+
+            rows = int(
+                input("Enter number of rows: ")
+            )
+
+            cols = int(
+                input("Enter number of columns: ")
+            )
 
             if rows <= 0 or cols <= 0:
-                print("Rows and columns must be greater than 0.")
+
+                print(
+                    "Rows and columns must be greater than 0."
+                )
+
                 continue
 
             matrix = []
@@ -72,9 +86,11 @@ def get_matrix():
                     ).split()
 
                     if len(values) != cols:
+
                         print(
                             f"Please enter exactly {cols} values."
                         )
+
                         continue
 
                     try:
@@ -104,20 +120,286 @@ def get_matrix():
 
 
 # ==================================================
+# MATRIX VALIDATION
+# ==================================================
+
+def validate_matrix(matrix):
+
+    if not isinstance(matrix, list):
+        return False
+
+    if len(matrix) == 0:
+        return False
+
+    if not all(
+            isinstance(row, list)
+            for row in matrix
+    ):
+        return False
+
+    if not all(
+            len(row) == len(matrix[0])
+            for row in matrix
+    ):
+        return False
+
+    if len(matrix[0]) == 0:
+        return False
+
+    return True
+
+
+def normalize_matrix(matrix):
+
+    if not validate_matrix(matrix):
+
+        raise ValueError(
+            "Invalid matrix format."
+        )
+
+    return [
+        [
+            sp.sympify(value)
+            for value in row
+        ]
+        for row in matrix
+    ]
+
+
+# ==================================================
+# MATRIX EXTRACTION FALLBACK
+# ==================================================
+
+def extract_matrices_from_input(user_input):
+
+    """
+    Extract matrix-like Python/JSON arrays from
+    the user's natural-language request.
+
+    Example:
+
+    Multiply [[1,2],[3,4]] and [[5,6],[7,8]]
+
+    returns:
+
+    [
+        [[1,2],[3,4]],
+        [[5,6],[7,8]]
+    ]
+    """
+
+    matrices = []
+
+    text = user_input
+
+    depth = 0
+    start = None
+
+    for index, char in enumerate(text):
+
+        if char == "[":
+
+            if depth == 0:
+                start = index
+
+            depth += 1
+
+        elif char == "]":
+
+            if depth > 0:
+
+                depth -= 1
+
+                if depth == 0 and start is not None:
+
+                    candidate = text[
+                        start:index + 1
+                    ]
+
+                    try:
+
+                        value = ast.literal_eval(
+                            candidate
+                        )
+
+                        if validate_matrix(value):
+
+                            matrices.append(
+                                value
+                            )
+
+                    except Exception:
+
+                        pass
+
+                    start = None
+
+    return matrices
+
+
+# ==================================================
+# EXPRESSION EXTRACTION FALLBACK
+# ==================================================
+
+def get_expression(plan, user_input):
+
+    expression = plan.get("expression")
+
+    if expression is not None:
+
+        expression = str(expression).strip()
+
+        if expression:
+            return expression
+
+    text = user_input.strip()
+    text = text.rstrip("?!.")
+
+    operation = plan.get(
+        "operation",
+        ""
+    ).lower()
+
+    lower_text = text.lower()
+
+    # --------------------------------------------------
+    # EQUATION / ROOTS
+    # --------------------------------------------------
+
+    if operation == "solve":
+
+        markers = [
+            "equation given",
+            "the equation",
+            "solve equation",
+            "solve",
+            "roots of",
+            "root of",
+            "roots for",
+            "root for",
+            "find the roots of",
+            "find roots of",
+            "find the root of",
+            "find root of"
+        ]
+
+        # Try the longest/more specific phrases first
+        markers = sorted(
+            markers,
+            key=len,
+            reverse=True
+        )
+
+        for marker in markers:
+
+            position = lower_text.find(marker)
+
+            if position != -1:
+
+                candidate = text[
+                    position + len(marker):
+                ].strip()
+
+                candidate = candidate.lstrip(": ")
+
+                if candidate.lower().startswith("given "):
+
+                    candidate = candidate[
+                        6:
+                    ].strip()
+
+                if candidate:
+                    return candidate
+
+    # --------------------------------------------------
+    # DERIVATIVE
+    # --------------------------------------------------
+
+    elif operation == "derivative":
+
+        markers = [
+            "derivative of",
+            "differentiate",
+            "derivative",
+            "rate of change of"
+        ]
+
+        markers = sorted(
+            markers,
+            key=len,
+            reverse=True
+        )
+
+        for marker in markers:
+
+            position = lower_text.find(marker)
+
+            if position != -1:
+
+                candidate = text[
+                    position + len(marker):
+                ].strip()
+
+                candidate = candidate.lstrip(": ")
+
+                if candidate:
+                    return candidate
+
+    # --------------------------------------------------
+    # INTEGRAL
+    # --------------------------------------------------
+
+    elif operation == "integral":
+
+        markers = [
+            "integral of",
+            "integrate",
+            "integral"
+        ]
+
+        markers = sorted(
+            markers,
+            key=len,
+            reverse=True
+        )
+
+        for marker in markers:
+
+            position = lower_text.find(marker)
+
+            if position != -1:
+
+                candidate = text[
+                    position + len(marker):
+                ].strip()
+
+                candidate = candidate.lstrip(": ")
+
+                if candidate:
+                    return candidate
+
+    return user_input
+
+# ==================================================
 # EQUATION HANDLER
 # ==================================================
 
-def handle_equation(user_input):
+def handle_equation(expression):
 
-    if user_input.lower().startswith("solve"):
+    # The LLM planner has already extracted the
+    # mathematical expression. Do not parse natural
+    # language again here.
 
-        expression = user_input[5:].strip()
+    expression = str(expression).strip()
 
-    else:
+    if not expression:
+        raise ValueError(
+            "No mathematical expression was provided."
+        )
 
-        expression = user_input
-
-    result = solve_equation(expression)
+    result = solve_equation(
+        expression
+    )
 
     verification = verify_equation(
         expression,
@@ -128,7 +410,10 @@ def handle_equation(user_input):
 
     if "=" in expression:
 
-        left, right = expression.split("=")
+        left, right = expression.split(
+            "=",
+            1
+        )
 
         equation_expression = sp.expand(
             sp.sympify(left)
@@ -146,18 +431,71 @@ def handle_equation(user_input):
         equation_expression,
         x
     )
-
     if degree == 1:
 
-        steps = explain_linear_equation(
-            expression
-        )
+        if "=" in expression:
+
+            steps = explain_linear_equation(
+                expression
+            )
+
+        else:
+
+            polynomial = sp.Poly(
+                equation_expression,
+                x
+            )
+
+            a = polynomial.coeff_monomial(x)
+            b = polynomial.coeff_monomial(1)
+
+            steps = [
+                f"Original expression: {expression}",
+                f"Rewrite as an equation: {a}*x + {b} = 0",
+                f"Move the constant term: {a}*x = {-b}",
+                f"Divide by {a}: x = {-b}/{a}",
+                f"Solution: {result}"
+            ]
 
     elif degree == 2:
 
-        steps = explain_quadratic_equation(
-            expression
-        )
+        # The quadratic explainer expects an equation
+        # containing "=". For an expression such as
+        # "3*x**2 - 12*x + 9", create a safe explanation
+        # directly instead of sending the expression to
+        # an explainer that tries to split on "=".
+
+        if "=" in expression:
+
+            steps = explain_quadratic_equation(
+                expression
+            )
+
+        else:
+
+            polynomial = sp.Poly(
+                equation_expression,
+                x
+            )
+
+            a = polynomial.coeff_monomial(x**2)
+            b = polynomial.coeff_monomial(x)
+            c = polynomial.coeff_monomial(1)
+
+            discriminant = sp.expand(
+                b**2 - 4*a*c
+            )
+
+            steps = [
+                f"Original expression: {expression}",
+                f"Rewrite in standard form: {a}*x**2 + {b}*x + {c} = 0",
+                f"Identify coefficients: a = {a}, b = {b}, c = {c}",
+                "Calculate the discriminant: b² - 4ac",
+                f"Discriminant = {discriminant}",
+                "Use the quadratic formula:",
+                "x = (-b ± √(b² - 4ac)) / (2a)",
+                f"Solutions: {result}"
+            ]
 
     else:
 
@@ -181,9 +519,13 @@ def handle_equation(user_input):
 
 def handle_derivative(user_input):
 
-    if user_input.lower().startswith("derivative"):
+    if user_input.lower().startswith(
+            "derivative"
+    ):
 
-        expression = user_input[10:].strip()
+        expression = user_input[
+            10:
+        ].strip()
 
     else:
 
@@ -209,15 +551,20 @@ def handle_derivative(user_input):
         "steps": steps
     }
 
+
 # ==================================================
 # INTEGRAL HANDLER
 # ==================================================
 
 def handle_integral(user_input):
 
-    if user_input.lower().startswith("integral"):
+    if user_input.lower().startswith(
+            "integral"
+    ):
 
-        expression = user_input[8:].strip()
+        expression = user_input[
+            8:
+        ].strip()
 
     else:
 
@@ -243,13 +590,20 @@ def handle_integral(user_input):
         "steps": steps
     }
 
+
 # ==================================================
 # MATRIX DETERMINANT HANDLER
 # ==================================================
 
-def handle_determinant():
+def handle_determinant(matrix=None):
 
-    matrix = get_matrix()
+    if matrix is None:
+
+        matrix = get_matrix()
+
+    matrix = normalize_matrix(
+        matrix
+    )
 
     result = matrix_determinant(
         matrix
@@ -277,14 +631,21 @@ def handle_determinant():
 # MATRIX INVERSE HANDLER
 # ==================================================
 
-def handle_inverse():
+def handle_inverse(matrix=None):
 
-    matrix = get_matrix()
+    if matrix is None:
+
+        matrix = get_matrix()
+
+    matrix = normalize_matrix(
+        matrix
+    )
 
     if len(matrix) != len(matrix[0]):
 
         return {
             "operation": "Matrix Inverse",
+            "matrix": matrix,
             "error":
                 "Matrix inverse requires "
                 "a square matrix."
@@ -316,9 +677,15 @@ def handle_inverse():
 # MATRIX TRANSPOSE HANDLER
 # ==================================================
 
-def handle_transpose():
+def handle_transpose(matrix=None):
 
-    matrix = get_matrix()
+    if matrix is None:
+
+        matrix = get_matrix()
+
+    matrix = normalize_matrix(
+        matrix
+    )
 
     result = matrix_transpose(
         matrix
@@ -346,9 +713,15 @@ def handle_transpose():
 # MATRIX RANK HANDLER
 # ==================================================
 
-def handle_rank():
+def handle_rank(matrix=None):
 
-    matrix = get_matrix()
+    if matrix is None:
+
+        matrix = get_matrix()
+
+    matrix = normalize_matrix(
+        matrix
+    )
 
     result = matrix_rank(
         matrix
@@ -376,9 +749,15 @@ def handle_rank():
 # MATRIX EIGENVALUES HANDLER
 # ==================================================
 
-def handle_eigenvalues():
+def handle_eigenvalues(matrix=None):
 
-    matrix = get_matrix()
+    if matrix is None:
+
+        matrix = get_matrix()
+
+    matrix = normalize_matrix(
+        matrix
+    )
 
     result = matrix_eigenvalues(
         matrix
@@ -406,13 +785,34 @@ def handle_eigenvalues():
 # MATRIX MULTIPLICATION HANDLER
 # ==================================================
 
-def handle_multiply():
+def handle_multiply(
+        matrix_a=None,
+        matrix_b=None
+):
 
-    print("\nEnter the first matrix:")
-    matrix_a = get_matrix()
+    if matrix_a is None:
 
-    print("\nEnter the second matrix:")
-    matrix_b = get_matrix()
+        print(
+            "\nEnter the first matrix:"
+        )
+
+        matrix_a = get_matrix()
+
+    if matrix_b is None:
+
+        print(
+            "\nEnter the second matrix:"
+        )
+
+        matrix_b = get_matrix()
+
+    matrix_a = normalize_matrix(
+        matrix_a
+    )
+
+    matrix_b = normalize_matrix(
+        matrix_b
+    )
 
     # Matrix multiplication condition:
     # columns of A == rows of B
@@ -440,31 +840,42 @@ def handle_multiply():
         result
     )
 
-    # Step-by-step explanation
     rows_a = len(matrix_a)
     cols_a = len(matrix_a[0])
+
+    rows_b = len(matrix_b)
     cols_b = len(matrix_b[0])
 
     steps = [
         "Write the first matrix A.",
+
         "Write the second matrix B.",
+
         (
             f"Matrix A has dimensions "
             f"{rows_a} × {cols_a}."
         ),
+
         (
             f"Matrix B has dimensions "
-            f"{len(matrix_b)} × {cols_b}."
+            f"{rows_b} × {cols_b}."
         ),
+
         (
             "Matrix multiplication is possible because "
             "the columns of A equal the rows of B."
         ),
+
         (
             "Multiply each row of A by each column of B "
             "and add the corresponding products."
         ),
-        f"Resulting matrix has dimensions {rows_a} × {cols_b}.",
+
+        (
+            f"Resulting matrix has dimensions "
+            f"{rows_a} × {cols_b}."
+        ),
+
         f"Final result: {result}"
     ]
 
@@ -485,15 +896,103 @@ def handle_multiply():
 def run_agent(user_input):
 
     # --------------------------------------------------
-    # STEP 1: CREATE PLAN
+    # STEP 1: CREATE PLAN USING LLM
     # --------------------------------------------------
 
-    plan = create_plan(
-        user_input
-    )
+    planner_used = "LLM"
+
+    try:
+
+        plan = create_llm_plan(
+            user_input
+        )
+
+        if not isinstance(plan, dict):
+
+            raise ValueError(
+                "LLM planner did not return a dictionary."
+            )
+
+        if "category" not in plan:
+
+            raise ValueError(
+                "LLM plan is missing category."
+            )
+
+        if "operation" not in plan:
+
+            raise ValueError(
+                "LLM plan is missing operation."
+            )
+
+    except Exception as e:
+
+        print(
+            "\nLLM planner failed."
+        )
+
+        print(
+            f"Reason: {e}"
+        )
+
+        print(
+            "Using keyword planner as fallback."
+        )
+
+        planner_used = "Keyword Fallback"
+
+        plan = create_plan(
+            user_input
+        )
 
     # --------------------------------------------------
-    # STEP 2: SELECT TOOL
+    # STEP 2: MATRIX DATA FALLBACK
+    # --------------------------------------------------
+
+    if plan.get("category") == "matrix":
+
+        operation = plan.get(
+            "operation"
+        )
+
+        matrices = extract_matrices_from_input(
+            user_input
+        )
+
+        # Single matrix operation
+        if operation in {
+            "determinant",
+            "inverse",
+            "transpose",
+            "rank",
+            "eigenvalues"
+        }:
+
+            if "matrix" not in plan:
+
+                if len(matrices) >= 1:
+
+                    plan["matrix"] = matrices[0]
+
+        # Matrix multiplication
+        elif operation == "multiply":
+
+            if (
+                    "matrix_a" not in plan
+                    and len(matrices) >= 1
+            ):
+
+                plan["matrix_a"] = matrices[0]
+
+            if (
+                    "matrix_b" not in plan
+                    and len(matrices) >= 2
+            ):
+
+                plan["matrix_b"] = matrices[1]
+
+    # --------------------------------------------------
+    # STEP 3: SELECT TOOL
     # --------------------------------------------------
 
     tool = select_tool(
@@ -510,7 +1009,8 @@ def run_agent(user_input):
             "error":
                 "I could not understand the "
                 "mathematical operation.",
-            "plan": plan
+            "plan": plan,
+            "planner_used": planner_used
         }
 
     try:
@@ -521,8 +1021,13 @@ def run_agent(user_input):
 
         if tool == "solve_equation":
 
-            result = handle_equation(
+            expression = get_expression(
+                plan,
                 user_input
+            )
+
+            result = handle_equation(
+                expression
             )
 
         # --------------------------------------------------
@@ -531,8 +1036,13 @@ def run_agent(user_input):
 
         elif tool == "derivative":
 
-            result = handle_derivative(
+            expression = get_expression(
+                plan,
                 user_input
+            )
+
+            result = handle_derivative(
+                expression
             )
 
         # --------------------------------------------------
@@ -541,8 +1051,13 @@ def run_agent(user_input):
 
         elif tool == "integral":
 
-            result = handle_integral(
+            expression = get_expression(
+                plan,
                 user_input
+            )
+
+            result = handle_integral(
+                expression
             )
 
         # --------------------------------------------------
@@ -551,7 +1066,19 @@ def run_agent(user_input):
 
         elif tool == "matrix_determinant":
 
-            result = handle_determinant()
+            matrix = plan.get(
+                "matrix"
+            )
+
+            if matrix is None:
+
+                result = handle_determinant()
+
+            else:
+
+                result = handle_determinant(
+                    matrix
+                )
 
         # --------------------------------------------------
         # MATRIX INVERSE
@@ -559,7 +1086,19 @@ def run_agent(user_input):
 
         elif tool == "matrix_inverse":
 
-            result = handle_inverse()
+            matrix = plan.get(
+                "matrix"
+            )
+
+            if matrix is None:
+
+                result = handle_inverse()
+
+            else:
+
+                result = handle_inverse(
+                    matrix
+                )
 
         # --------------------------------------------------
         # MATRIX TRANSPOSE
@@ -567,7 +1106,19 @@ def run_agent(user_input):
 
         elif tool == "matrix_transpose":
 
-            result = handle_transpose()
+            matrix = plan.get(
+                "matrix"
+            )
+
+            if matrix is None:
+
+                result = handle_transpose()
+
+            else:
+
+                result = handle_transpose(
+                    matrix
+                )
 
         # --------------------------------------------------
         # MATRIX RANK
@@ -575,7 +1126,19 @@ def run_agent(user_input):
 
         elif tool == "matrix_rank":
 
-            result = handle_rank()
+            matrix = plan.get(
+                "matrix"
+            )
+
+            if matrix is None:
+
+                result = handle_rank()
+
+            else:
+
+                result = handle_rank(
+                    matrix
+                )
 
         # --------------------------------------------------
         # MATRIX EIGENVALUES
@@ -583,7 +1146,19 @@ def run_agent(user_input):
 
         elif tool == "matrix_eigenvalues":
 
-            result = handle_eigenvalues()
+            matrix = plan.get(
+                "matrix"
+            )
+
+            if matrix is None:
+
+                result = handle_eigenvalues()
+
+            else:
+
+                result = handle_eigenvalues(
+                    matrix
+                )
 
         # --------------------------------------------------
         # MATRIX MULTIPLICATION
@@ -591,7 +1166,27 @@ def run_agent(user_input):
 
         elif tool == "matrix_multiply":
 
-            result = handle_multiply()
+            matrix_a = plan.get(
+                "matrix_a"
+            )
+
+            matrix_b = plan.get(
+                "matrix_b"
+            )
+
+            if (
+                    matrix_a is None
+                    or matrix_b is None
+            ):
+
+                result = handle_multiply()
+
+            else:
+
+                result = handle_multiply(
+                    matrix_a,
+                    matrix_b
+                )
 
         # --------------------------------------------------
         # TOOL NOT IMPLEMENTED
@@ -603,23 +1198,31 @@ def run_agent(user_input):
                 "error":
                     f"Tool '{tool}' is not implemented.",
                 "plan": plan,
-                "selected_tool": tool
+                "selected_tool": tool,
+                "planner_used": planner_used
             }
 
         # --------------------------------------------------
-        # ADD PLAN INFORMATION
+        # ADD AGENT INFORMATION
         # --------------------------------------------------
 
         result["plan"] = plan
+
         result["selected_tool"] = tool
+
+        result["planner_used"] = planner_used
 
         return result
 
     except Exception as e:
 
         return {
-            "operation": plan["operation"],
+            "operation": plan.get(
+                "operation",
+                "unknown"
+            ),
             "error": str(e),
             "plan": plan,
-            "selected_tool": tool
+            "selected_tool": tool,
+            "planner_used": planner_used
         }

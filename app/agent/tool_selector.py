@@ -1,26 +1,20 @@
 def select_tool(plan):
-    """
-    Select the mathematical tool based on
-    the plan created by the planner.
-    """
 
     category = plan["category"]
+
     operation = plan["operation"]
 
     tools = {
 
-        # Equations
         ("equation", "solve"):
             "solve_equation",
 
-        # Calculus
         ("calculus", "derivative"):
             "derivative",
 
         ("calculus", "integral"):
             "integral",
 
-        # Matrices
         ("matrix", "determinant"):
             "matrix_determinant",
 
